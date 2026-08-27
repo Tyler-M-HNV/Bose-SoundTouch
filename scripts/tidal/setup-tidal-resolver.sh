@@ -8,9 +8,9 @@
 #
 # What it does:
 #   1. Clones your tidal-dl fork (Tyler-M-HNV/tidal-dl) into .tidal-dl-src/
-#      at a pinned commit (override with TIDAL_DL_REF).
-#   2. Vendors the auth + playback packages into pkg/service/tidalapi/
-#      and rewrites the module import path so `go build` resolves locally.
+#      at a pinned ref (override with TIDAL_DL_REF).
+#   2. Vendors the library packages into pkg/service/tidalapi/ and rewrites
+#      the module import path so `go build` resolves locally.
 #   3. Prints a checklist of the wiring that still has to be done by hand
 #      (routes, service descriptor, settings fields).
 #
@@ -23,6 +23,27 @@ TIDAL_DL_FORK="${TIDAL_DL_FORK:-https://github.com/Tyler-M-HNV/tidal-dl.git}"
 TIDAL_DL_REF="${TIDAL_DL_REF:-main}"
 SRC_DIR=".tidal-dl-src"
 VENDOR_DIR="pkg/service/tidalapi"
+
+# tidal-dl library layout (verified 2026-08-27). Skipped: video/, .idea/,
+# downloader front-ends — the resolver only needs catalog + auth + playback.
+PACKAGES=(
+  auth
+  session
+  requests
+  credentials
+  common
+  generics
+  track
+  album
+  artist
+  artist_type
+  playlist
+  search
+  user
+  audio_quality
+  encryption_type
+)
+TOPLEVEL_GO=(login.go)
 
 # --- preconditions -----------------------------------------------------------
 
@@ -48,22 +69,21 @@ git -C "$SRC_DIR" checkout --quiet "$TIDAL_DL_REF"
 PINNED="$(git -C "$SRC_DIR" rev-parse HEAD)"
 echo "==> pinned tidal-dl at $PINNED"
 
-# --- 2. vendor auth + playback packages -------------------------------------
-
-# tidal-dl layout (adjust here if upstream reshuffles):
-#   auth/      device-code OAuth flow, token refresh
-#   tidalapi/  catalog + playback info (GetPlaybackInfo -> BTS manifest)
-PACKAGES=(auth tidalapi)
+# --- 2. vendor the library packages -----------------------------------------
 
 rm -rf "$VENDOR_DIR"
 mkdir -p "$VENDOR_DIR"
 
 for pkg in "${PACKAGES[@]}"; do
   if [[ ! -d "$SRC_DIR/$pkg" ]]; then
-    echo "error: upstream package '$pkg' not found — check tidal-dl layout" >&2
+    echo "error: upstream package '$pkg' not found — tidal-dl layout changed?" >&2
     exit 1
   fi
   cp -r "$SRC_DIR/$pkg" "$VENDOR_DIR/$pkg"
+done
+
+for f in "${TOPLEVEL_GO[@]}"; do
+  [[ -f "$SRC_DIR/$f" ]] && cp "$SRC_DIR/$f" "$VENDOR_DIR/$f"
 done
 
 # Rewrite imports: upstream module path -> local vendored path.
@@ -95,9 +115,11 @@ and the TuneIn adapter as the template):
 
   [ ] pkg/service/bmx/tidal.go          — model on tunein.go:
         Navigate/Search/Playback returning models.BmxNavResponse /
-        models.BmxPlaybackResponse; use tidalapi GetPlaybackInfo and keep
-        only manifests with encryptionType NONE (plain FLAC URLs) so
-        BuildCustomStreamResponseFromURLs can consume them.
+        models.BmxPlaybackResponse; use the vendored track package's
+        playback-info call and keep only manifests with encryptionType NONE
+        (plain FLAC URLs) so BuildCustomStreamResponseFromURLs can consume
+        them. HLS/DASH manifests are a known-broken container on SoundTouch
+        10 / firmware 27 (repo issue #292).
   [ ] pkg/service/handlers/handlers_bmx_tidal.go
         — model on handlers_bmx_tunein.go (chi routes under /bmx/tidal/).
   [ ] bmx_services.json                  — add the TIDAL service descriptor
@@ -111,5 +133,6 @@ and the TuneIn adapter as the template):
 
 Also on the bench: test whether the speaker firmware's baked-in Tidal
 client still authenticates against Tidal (Spotify-style OAuth-intercept
-priming) — if yes, that path is cheaper than this resolver for playback.
+priming, see docs/content/docs/concepts/spotify-overview.md) — if yes,
+that path is cheaper than this resolver for playback.
 EOF
